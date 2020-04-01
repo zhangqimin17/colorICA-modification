@@ -1,0 +1,512 @@
+---
+title: "cICA"
+author: "Qimin Zhang"
+date: "2/28/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(coloredICA)
+library(fastICA)
+library(rlist)
+```
+
+```{r cICA}
+cICA = function (Xin, M = dim(Xin)[1], Win = diag(M), tol = 1e-04, maxit = 20, 
+    nmaxit = 1, unmixing.estimate = "eigenvector", maxnmodels = 100, batch_size = 32) {
+    p = dim(Xin)[1]
+    if (M > p) {
+        stop("Number of sources must be less or equal than number \n  of variables")
+    }
+    if (unmixing.estimate != "eigenvector" && unmixing.estimate != 
+        "newton") {
+        stop("Methods to estimate the unmixing matrix can be \n  'eigenvector' or 'newton' only")
+    }
+    N = ncol(Xin)
+    Xc = t(scale(t(Xin), center = TRUE, scale = FALSE))
+    svdcovmat = svd(Xc/sqrt(N))
+    K = t(svdcovmat$u %*% diag(1/svdcovmat$d))
+    K = K[1:M, ]
+    Xc = K %*% Xc
+    W1 = Win
+    wlik = -Inf
+    rm(list = c("Win"))
+    if (unmixing.estimate == "eigenvector") {
+        freqlength = floor(N/2 - 1)
+        freq = 1:freqlength * 2 * pi/N
+        g = matrix(0, M, freqlength)
+        X.dft = t(mvfft(t(Xc)))/sqrt(2 * pi * N)
+        WXc = W1 %*% Xc
+        for (j in 1:M) {
+            fit = ar.yw(WXc[j, ], order.max = maxnmodels)
+            if (fit$order == 0) 
+                g[j, ] = fit$var.pred/(2 * pi) * rep(1, freqlength)
+            else g[j, ] = (fit$var.pred/(2 * pi))/(abs(1 - matrix(fit$ar, 
+                1, fit$order) %*% exp(-(0+1i) * matrix(1:fit$order, 
+                fit$order, 1) %*% freq))^2)
+        }
+        rm(list = c("WXc"))
+        lim = 1
+        iter = 0
+        NInv = 0
+        index1 = as.double(gl(M, M))
+        index2 = as.double(gl(M, 1, M^2))
+        indx = 2:(freqlength + 1)
+        tmp = Re(X.dft[index1, indx] * Conj(X.dft[index2, indx]))
+        while (lim > tol & iter < maxit & NInv < nmaxit) {
+            iter = iter + 1
+            taucount = 1
+            err = 1
+            orthoerror = 1
+            W2 = W1
+            tau = 0.5
+            eigenval = rep(0, M)
+            while (taucount < 60 & err > 1e-05 & orthoerror > 
+                1e-05) {
+                for (j in 1:M) {
+                  Gam = 0
+                  if (j > 1) {
+                    for (k in 1:(j - 1)) {
+                      nu = matrix(W2[k, ], M, 1) %*% matrix(W2[k, 
+                        ], 1, M)
+                      Gam = Gam + nu
+                    }
+                  }
+                  tmpmat = t(matrix(tmp %*% matrix(1/g[j, ], 
+                    freqlength, 1), M, M))
+                  tmpV = tmpmat + tau * Gam
+                  eigenv = eigen(tmpV)
+                  eigenval[j] = eigenv$values[M]
+                  W2[j, ] = eigenv$vectors[, M]
+                }
+                orthoerror = sum(sum((W2 %*% t(W2) - diag(rep(1, 
+                  M)))^2))
+                err = amari_distance(rerow(W1), rerow(W2))
+                taucount = taucount + 1
+                tau = 2 * tau
+            }
+            wlik2 = -1 * sum(eigenval) - 1 * sum(log(g)) + N * 
+                log(abs(det(W2)))
+            if (wlik < wlik2) {
+                Wtmp = W1
+                wlik = wlik2
+            }
+            else print(paste("Color ICA - Iteration ", iter, 
+                ": current Whittle likelihood(", wlik2, ") is smaller than previous one (", 
+                wlik, ")."))
+            lim = err
+            print(paste("Color ICA - Iteration ", iter, ": error is equal to ", 
+                lim, sep = ""))
+            W1 = W2
+            if ((iter == maxit & NInv < nmaxit)) {
+                print("Color ICA: iteration reaches to maximum. Start new iteration.")
+                W2 = matrix(rnorm(M * M), M, M)
+                qrdec = qr(W2)
+                W2 = qr.Q(qrdec)
+                iter = 0
+                NInv = NInv + 1
+            }
+            WXc = W2 %*% Xc
+            for (j in 1:M) {
+                fit = ar.yw(WXc[j, ], order.max = maxnmodels)
+                if (fit$order == 0) 
+                  g[j, ] = fit$var.pred/(2 * pi) * rep(1, freqlength)
+                else g[j, ] = (fit$var.pred/(2 * pi))/(abs(1 - 
+                  matrix(fit$ar, 1, fit$order) %*% exp(-(0+1i) * 
+                    matrix(1:fit$order, fit$order, 1) %*% freq))^2)
+            }
+            if (NInv == nmaxit) {
+                print("Color ICA: no convergence")
+            }
+        }
+        if (wlik > wlik2) {
+            W2 = Wtmp
+            wlik2 = wlik
+        }
+    }
+    if (unmixing.estimate == "newton") {
+        freqlength = N
+        freq = 1:freqlength * 2 * pi/N
+        g = matrix(0, M, freqlength)
+        X.dft = t(mvfft(t(Xc)))/sqrt(2 * pi * N)
+        WXc = W1 %*% Xc
+        for (j in 1:M) {
+            fit = ar.yw(WXc[j, ], order.max = maxnmodels)
+            if (fit$order == 0) 
+                g[j, ] = fit$var.pred/(2 * pi) * rep(1, freqlength)
+            else g[j, ] = (fit$var.pred/(2 * pi))/(abs(1 - matrix(fit$ar, 
+                1, fit$order) %*% exp(-(0+1i) * matrix(1:fit$order, 
+                fit$order, 1) %*% freq))^2)
+        }
+        lim = 1
+        iter = 0
+        NInv = 0
+        lambda = rep(1, M * (M + 1)/2)
+        index1 = rep(1:M, rep(M, M))
+        index2 = rep(1:M, M)
+        tempmx1 = matrix(index2, M, M)
+        tempmx2 = matrix(index1, M, M)
+        tempmx1 = tempmx1[index1 <= index2]
+        tempmx2 = tempmx2[index1 <= index2]
+        indx_temp = cbind(diag(rep(1, M * (M + 1)/2)), matrix(0, 
+            M * (M + 1)/2, M * (M - 1)/2))
+        while (lim > tol & iter < maxit & NInv < nmaxit) {
+            iter = iter + 1
+            if (iter == 0 && NInv > 0) {
+                W2 = matrix(rnorm(M * M), M, M)
+                qrdec = qr(W2)
+                W2 = qr.Q(qrdec)
+                lambda = rep(1, M * (M + 1)/2)
+                W1 = W2
+            }
+            X.wdft = W1 %*% X.dft
+            W1_inv = solve(W1)
+            Score_l = 2 * rowSums(Re(Conj(X.wdft[index1, ]) * 
+                X.dft[index2, ])/g[index1, ]) - N * matrix(W1_inv, 
+                M^2, 1)
+            Score_l = 2 * rowSums(Re(Conj(X.wdft[index1, ]) * 
+                X.dft[index2, ])/g[index1, ]) - N * matrix(W1_inv, 
+                M^2, 1)
+            c_e = W1 %*% t(W1) - diag(rep(1, M))
+            c_e = c_e[index1 <= index2]
+            J_e1 = W1[tempmx1, index2] * indx_temp[tempmx2, index1]
+            J_e2 = W1[tempmx2, index2] * indx_temp[tempmx1, index1]
+            J_e = J_e1 + J_e2
+            temp_l = matrix(0, M^2, M^2)
+            for (o in 1:M) {
+                for (j in 1:M) {
+                  for (k in 1:M) {
+                    for (l in 1:M) {
+                      if (k == o && o == j && j == l) {
+                        temp_l[((o - 1) * M + j), ((k - 1) * 
+                          M + l)] = lambda[(o * (o + 1)/2)]
+                      }
+                    }
+                  }
+                }
+            }
+            temp_h = matrix(0, M^2, M^2)
+            tmpm = Re(Conj(X.dft[index1, ]) * X.dft[index2, ])
+            for (j in 1:M) {
+                temp_h[((j - 1) * M + 1):(j * M), ((j - 1) * 
+                  M + 1):(j * M)] = 2 * t(matrix(tmpm %*% cbind(g[j, 
+                  ]^(-1)), M, M))
+            }
+            rm(tmpm)
+            Hessian_l = temp_h - temp_l + N * t(W1_inv[index2, 
+                index1] * t(W1_inv[index2, index1]))
+            H = rbind(cbind(Hessian_l, -t(J_e)), cbind(-J_e, 
+                matrix(0, M * (M + 1)/2, M * (M + 1)/2)))
+            rcondh = rcond(H)
+            if (iter == maxit) {
+                print("Color ICA: iteration reaches to maximum. Start new iteration.")
+                iter = 0
+                NInv = NInv + 1
+            }
+            if (rcondh < 10^(-15)) {
+                print("Color ICA: low condition number. Start new iteration.")
+                iter = 0
+                NInv = NInv + 1
+            }
+            if (rcondh >= 10^(-15)) {
+                V_W = rbind(matrix(t(W1), M^2, 1), cbind(lambda)) - 
+                  solve(H) %*% (rbind(Score_l - (t(J_e) %*% lambda), 
+                    -cbind(c_e)))
+                W2 = t(matrix(V_W[1:M^2], M, M))
+                lambda = V_W[(M^2 + 1):(M * (3 * M + 1)/2)]
+                lim = amari_distance(rerow(W2), rerow(W1))
+                W1 = W2
+                print(paste("Color ICA - Iteration ", iter, ": error is equal to ", 
+                  lim, sep = ""))
+            }
+            WXc = W2 %*% Xc
+            for (j in 1:M) {
+                fit = ar.yw(WXc[j, ], order.max = maxnmodels)
+                if (fit$order == 0) 
+                  g[j, ] = fit$var.pred/(2 * pi) * rep(1, freqlength)
+                else g[j, ] = (fit$var.pred/(2 * pi))/(abs(1 - 
+                  matrix(fit$ar, 1, fit$order) %*% exp(-(0+1i) * 
+                    matrix(1:fit$order, fit$order, 1) %*% freq))^2)
+            }
+            if (NInv == nmaxit) {
+                print("Color ICA: no convergence")
+            }
+        }
+    }
+    wt = W2 %*% K
+    result = new.env()
+    result$W = W2
+    result$K = K
+    result$A = t(wt) %*% solve(wt %*% t(wt))
+    result$S = wt %*% Xin
+    result$X = Xin
+    result$iter = iter
+    result$NInv = NInv
+    result$den = g
+    as.list(result)
+}
+```
+
+
+
+```{r split matrix}
+split_matrix = function(X, batch_size = 32){  
+  n=ncol(X)  
+  nbatch = floor(n/batch_size)
+  return(lapply(1:nbatch, 
+         function(x){
+          if (x < nbatch){
+            X[,1:batch_size + (x-1)*batch_size]
+            }
+          else{
+            X[,((nbatch-1)*batch_size+1):n]
+            }
+          })
+         )
+  }
+```
+
+
+```{r mini batch cICA}
+minibatch_cICA = function (X, M = dim(X)[1], Win = diag(M), tol = 1e-04, maxit = 20, 
+          nmaxit = 1, unmixing.estimate = "eigenvector", maxnmodels = 100, batch_size = 32) {
+  split_matrix = function(X){  
+  n=ncol(X)  
+  nbatch = floor(n/batch_size)
+  return(lapply(1:nbatch, 
+         function(x){
+          if (x < nbatch){
+            X[,1:batch_size + (x-1)*batch_size]
+            }
+          else{
+            X[,((nbatch-1)*batch_size+1):n]
+            }
+          })
+         )
+  }
+  Xin_processed_df = list()
+  if (unmixing.estimate != "eigenvector") {
+      stop("Methods to estimate the unmixing matrix can be \n  'eigenvector' only")
+  } 
+  wlik = -Inf
+  rm(list = c("Win"))
+    
+  for (Xin in Xin_split){
+    # Pre-processing X, considering to turn them into data frame
+    if (M > dim(Xin)[1]) {
+      stop("Number of sources must be less or equal than number \n  of variables")
+    }
+    N = dim(Xin)[2] 
+    Xc = t(scale(t(Xin), center = TRUE, scale = FALSE)) 
+    svdcovmat = svd(Xc/sqrt(N)) 
+    K = t(svdcovmat$u %*% diag(1/svdcovmat$d))
+    K = K[1:M, ] 
+    Xc = K %*% Xc
+    freqlength = floor(N/2 - 1) # used below
+    freq = 1:freqlength * 2 * pi/N # used below
+    g = matrix(0, M, freqlength) # spectral density # used below
+    X.dft = t(mvfft(t(Xc)))/sqrt(2 * pi * N) # used below
+    WXc = W1 %*% Xc # used below
+    indx = 2:(freqlength + 1) # used below
+    tmp = Re(X.dft[index1, indx] * Conj(X.dft[index2, indx])) # used below
+    for (j in 1:M) {
+      fit = ar.yw(WXc[j, ], order.max = maxnmodels) # used below
+      if (fit$order == 0) 
+        g[j, ] = fit$var.pred/(2 * pi) * rep(1, freqlength) # used below
+      else g[j, ] = (fit$var.pred/(2 * pi))/(abs(1 - matrix(fit$ar,1, fit$order) %*% exp(-(0+1i) * matrix(1:fit$order, fit$order, 1) %*% freq))^2)
+    }
+    rm(list = c("WXc"))
+    Xin_processed_df = list.append(
+      Xin_processed_df,
+      list(tmp = tmp, g = g, freqlength = freqlength, Xc = Xc, freq = freq)
+    )
+    }
+    
+    lim = 1
+    iter = 0
+    NInv = 0
+    index1 = as.double(gl(M, M))
+    index2 = as.double(gl(M, 1, M^2))
+    while (lim > tol & iter < maxit & NInv < nmaxit) {# iteration starts, deploy mini-batch method here, with updated W and g, and a mini Xc
+      random_index = sample(1:length(Xin_split), 1)
+      iter = iter + 1
+      taucount = 1
+      err = 1
+      orthoerror = 1
+      W2 = W1
+      tau = 0.5 # penalty
+      eigenval = rep(0, M)
+      while (taucount < 60 & err > 1e-05 & orthoerror > 1e-05) { # Only update W2
+        for (j in 1:M) {               # Go over all the elements in eigenval and W2
+          Gam = 0
+          if (j > 1) {
+            for (k in 1:(j - 1)) {
+              nu = matrix(W2[k, ], M, 1) %*% matrix(W2[k, ], 1, M)
+              Gam = Gam + nu
+            }
+          }
+          tmpmat = t(matrix(Xin_processed_df[random_index, ]$tmp %*% matrix(1/Xin_processed_df[random_index, ]$g[j, ], Xin_processed_df[random_index, ]$freqlength, 1), M, M))
+          tmpV = tmpmat + tau * Gam
+          eigenv = eigen(tmpV)
+          eigenval[j] = eigenv$values[M]  # update
+          W2[j, ] = eigenv$vectors[, M]
+        }
+        orthoerror = sum(sum((W2 %*% t(W2) - diag(rep(1,M)))^2))
+        err = amari_distance(rerow(W1), rerow(W2))
+        taucount = taucount + 1
+        tau = 2 * tau
+      }    # W update ends
+      wlik2 = -1 * sum(eigenval) - 1 * sum(log(Xin_processed_df[random_index, ]$g)) + N * log(abs(det(W2)))
+      if (wlik < wlik2) {
+        Wtmp = W1
+        wlik = wlik2
+      }
+      else print(paste("Color ICA - Iteration ", iter, 
+                       ": current Whittle likelihood(", wlik2, ") is smaller than previous one (", 
+                       wlik, ")."))
+      lim = err
+      print(paste("Color ICA - Iteration ", iter, ": error is equal to ", 
+                  lim, sep = ""))
+      W1 = W2  # Give the value of W2 to W1 for next iteration
+      if ((iter == maxit & NInv < nmaxit)) {
+        print("Color ICA: iteration reaches to maximum. Start new iteration.")
+        W2 = matrix(rnorm(M * M), M, M)
+        qrdec = qr(W2)
+        W2 = qr.Q(qrdec)
+        iter = 0
+        NInv = NInv + 1
+      }
+      WXc = W2 %*% Xin_processed_df[random_index, ]$Xc
+      for (j in 1:M) {
+        fit = ar.yw(WXc[j, ], order.max = maxnmodels) # Yule Walker
+        if (fit$order == 0) 
+          Xin_processed_df[random_index, ]$g[j, ] = fit$var.pred/(2 * pi) * rep(1, Xin_processed_df[random_index, ]$freqlength)  # g (spectral density) used from last batches
+        else Xin_processed_df[random_index, ]$g[j, ] = (fit$var.pred/(2 * pi))/(abs(1 - 
+                                                     matrix(fit$ar, 1, fit$order) %*% exp(-(0+1i) * 
+                                                                                            matrix(1:fit$order, fit$order, 1) %*% Xin_processed_df[random_index, ]$freq))^2) 
+      } # g update ends
+      if (NInv == nmaxit) {
+        print("Color ICA: no convergence")
+      }
+    }  # ends
+    
+    if (wlik > wlik2) {
+      W2 = Wtmp
+      wlik2 = wlik
+    }
+
+  
+  wt = W2 %*% K
+  result = new.env()
+  result$W = W2
+  result$K = K
+  result$A = t(wt) %*% solve(wt %*% t(wt))
+  result$S = wt %*% Xin
+  result$X = Xin
+  result$iter = iter
+  result$NInv = NInv
+  result$den = g
+  as.list(result)
+}
+```
+
+
+
+
+```{r cICA example}
+T=256
+n1=16
+n2=16
+M=3
+S1 = arima.sim(list(order=c(0,0,2),ma=c(1,0.25)),T)
+S2 = arima.sim(list(order=c(1,0,0), ar=-0.5),T,rand.gen = function(n, ...) (runif(n)-0.5)*sqrt(3))
+S3 = arima.sim(list(order=c(0,0,3),ma=c(1,0.25,0.5)),T)
+A = rerow(matrix(runif(M^2)-0.5,M,M))
+W = solve(A)
+S=rbind(S1,S2,S3)
+X = A %*% S
+cica = cICA(X,tol=0.001)
+## scica = scICA(X,n1=n1,n2=n2,h=0.8,tol=0.001)
+fica = fastICA(t(X),3)
+amari_distance(t(A),t(cica$A))
+## amari_distance(t(A),t(scica$A))
+amari_distance(t(A),fica$A)
+Shat1=cica$S
+## Shat2=scica$S
+Shat3=t(fica$S)
+par(mfrow=c(2,2))
+plot(S[1,],type="l",lwd=2)
+plot(Shat1[1,],type="l",lwd=2,col="red")
+plot(S[2,],type="l",lwd=2)
+plot(Shat1[2,],type="l",lwd=2,col="red")
+plot(S[3,],type="l",lwd=2)
+plot(Shat1[3,],type="l",lwd=2,col="red")
+```
+
+
+
+```{r}
+T=1024*20
+n1=16
+n2=16
+M=2
+S1 = arima.sim(list(order=c(0,0,2),ma=c(1,0.25)),T)
+S2 = arima.sim(list(order=c(1,0,0), ar=-0.5),T,rand.gen = function(n, ...) (runif(n)-0.5)*sqrt(3))
+A = rerow(matrix(runif(M^2)-0.5,M,M))
+W = solve(A)
+S=rbind(S1,S2)
+X = A %*% S
+cica = cICA(X,tol=0.001)
+## scica = scICA(X,n1=n1,n2=n2,h=0.8,tol=0.001)
+fica = fastICA(t(X),2)
+amari_distance(t(A),t(cica$A))
+## amari_distance(t(A),t(scica$A))
+amari_distance(t(A),fica$A)
+Shat1=cica$S
+## Shat2=scica$S
+Shat3=t(fica$S)
+par(mfrow=c(2,2))
+plot(S[1,],type="l",lwd=2)
+plot(S[2,],type="l",lwd=2)
+plot(Shat1[1,],type="l",lwd=2,col="red")
+plot(Shat1[2,],type="l",lwd=2,col="red")
+```
+
+```{r}
+T=256
+n1=16
+n2=16
+M=2
+S1 = arima.sim(list(order=c(0,0,2),ma=c(1,0.25)),T)
+S2 = arima.sim(list(order=c(1,0,0), ar=-0.5),T,rand.gen = function(n, ...) (runif(n)-0.5)*sqrt(3))
+A = rerow(matrix(runif(M^2)-0.5,M,M))
+W = solve(A)
+S=rbind(S1,S2)
+X = A %*% S
+cica = cICA(X,tol=0.001)
+## scica = scICA(X,n1=n1,n2=n2,h=0.8,tol=0.001)
+fica = fastICA(t(X),2)
+amari_distance(t(A),t(cica$A))
+## amari_distance(t(A),t(scica$A))
+amari_distance(t(A),fica$A)
+Shat1=cica$S
+## Shat2=scica$S
+Shat3=t(fica$S)
+par(mfrow=c(2,2))
+plot(S[1,],type="l",lwd=2)
+plot(S[2,],type="l",lwd=2)
+plot(Shat1[1,],type="l",lwd=2,col="red")
+plot(Shat1[2,],type="l",lwd=2,col="red")
+```
+
+
+```{r grad}
+grad = function (x, omega, l_period, n, freq, h) 
+{
+    -colSums(kern(omega, h, freq)$v * as.vector((-1 + exp(l_period - 
+        x[1] - t((t(freq) - omega)) %*% x[2:3]))) * cbind(rep(1, 
+        n), t((t(freq) - omega))))
+}
+```
+
