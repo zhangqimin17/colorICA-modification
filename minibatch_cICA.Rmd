@@ -15,24 +15,6 @@ library(listarrays)
 ```
 
 
-```{r split matrix}
-split_matrix = function(X, batch_size = 32){  
-  n=ncol(X)  
-  nbatch = floor(n/batch_size)
-  return(lapply(1:nbatch, 
-         function(i){
-          if (i < nbatch){
-            return(X[,1:batch_size + (i-1)*batch_size,drop=FALSE])
-            }
-          else{
-            return(X[,((nbatch-1)*batch_size+1):n,drop=FALSE])
-            }
-          })
-         )
-  }
-```
-
-
 ```{r mini batch cICA}
 minibatch_cICA = function (X, M = dim(X)[1], Win = diag(M), tol = 1e-04, maxit = 20, 
           nmaxit = 1, unmixing.estimate = "eigenvector", maxnmodels = 31, batch_size = 32) {
@@ -43,12 +25,22 @@ minibatch_cICA = function (X, M = dim(X)[1], Win = diag(M), tol = 1e-04, maxit =
     if (unmixing.estimate != "eigenvector") {
         stop("Methods to estimate the unmixing matrix can be \n  'eigenvector' only")
     }
+  n=ncol(X)  
+  nbatch = floor(n/batch_size)
+  Xin_split = lapply(1:nbatch, 
+         function(i){
+          if (i < nbatch){
+            return(X[,1:batch_size + (i-1)*batch_size,drop=FALSE])
+            }
+          else{
+            return(X[,((nbatch-1)*batch_size+1):n,drop=FALSE])
+            }
+          })
 
   Xin_processed = list()
   W1 = Win
   wlik = -Inf
   rm(list = c("Win"))
-  Xin_split = split_matrix(X)
   require(rlist)
   
   lim = 1
@@ -56,7 +48,7 @@ minibatch_cICA = function (X, M = dim(X)[1], Win = diag(M), tol = 1e-04, maxit =
   NInv = 0
   index1 = as.double(gl(M, M))
   index2 = as.double(gl(M, 1, M^2))
-    
+  
   for (i in 1:length(Xin_split)){
     # Pre-processing mini Xin, considering to turn them into data frame
     Xin = Xin_split[[i]]
@@ -161,15 +153,157 @@ minibatch_cICA = function (X, M = dim(X)[1], Win = diag(M), tol = 1e-04, maxit =
   result$W = W2
   result$K = K
   result$A = t(wt) %*% solve(wt %*% t(wt))
-  result$S = wt %*% Xin
-  result$X = Xin
+  result$S = wt %*% X
+  result$X = X
   result$iter = iter
   result$NInv = NInv
-  result$den = g
+  #result$den = g
   as.list(result)
 }
 ```
 
+```{r mini batch cICA}
+minibatch_cICA = function (X, M = dim(X)[1], Win = diag(M), tol = 1e-04, maxit = 20, 
+          nmaxit = 1, unmixing.estimate = "eigenvector", maxnmodels = 31, batch_size = 32) {
+  p = dim(X)[1]
+    if (M > p) {
+        stop("Number of sources must be less or equal than number \n  of variables")
+    }
+    if (unmixing.estimate != "eigenvector") {
+        stop("Methods to estimate the unmixing matrix can be \n  'eigenvector' only")
+    }
+  n=ncol(X)  
+  nbatch = floor(n/batch_size)
+  Xin_split = lapply(1:nbatch, 
+         function(i){
+          if (i < nbatch){
+            return(X[,1:batch_size + (i-1)*batch_size,drop=FALSE])
+            }
+          else{
+            return(X[,((nbatch-1)*batch_size+1):n,drop=FALSE])
+            }
+          })
+
+  W1 = Win
+  wlik = -Inf
+  rm(list = c("Win"))
+  
+  lim = 1
+  iter = 0
+  NInv = 0
+  index1 = as.double(gl(M, M))
+  index2 = as.double(gl(M, 1, M^2))
+  
+  x_process = function(i){
+    Xin = Xin_split[[i]]
+    N = ncol(Xin)
+    Xc = t(scale(t(Xin), center = TRUE, scale = FALSE)) 
+    svdcovmat = svd(Xc/sqrt(N)) 
+    K = t(svdcovmat$u %*% diag(1/svdcovmat$d))
+    K = K[1:M, ] 
+    Xc = K %*% Xc
+    freqlength = floor(N/2 - 1) # used below
+    freq = 1:freqlength * 2 * pi/N # used below
+    g = matrix(0, M, freqlength) # spectral density # used below
+    X.dft = t(mvfft(t(Xc)))/sqrt(2 * pi * N) # used below
+    WXc = W1 %*% Xc # used below
+    indx = 2:(freqlength + 1) # used below
+    tmp = Re(X.dft[index1, indx] * Conj(X.dft[index2, indx])) # used below
+    for (j in 1:M) {
+      fit = ar.yw(WXc[j, ], order.max = maxnmodels) # used below
+      if (fit$order == 0) 
+        g[j, ] = fit$var.pred/(2 * pi) * rep(1, freqlength) # used below
+      else g[j, ] = (fit$var.pred/(2 * pi))/(abs(1 - matrix(fit$ar,1, fit$order) %*% exp(-(0+1i) * matrix(1:fit$order, fit$order, 1) %*% freq))^2)
+    }
+    rm(list = c("WXc"))
+    indx = 2:(freqlength + 1)
+    tmp = Re(X.dft[index1, indx] * Conj(X.dft[index2, indx]))
+    return(list(tmp = tmp, g = g, freqlength = freqlength, Xc = Xc, freq = freq))
+  }
+  
+  Xin_processed = lapply(1:length(Xin_split), x_process)
+  
+  while (lim > tol & iter < maxit & NInv < nmaxit) {# iteration starts, deploy mini-batch method here, with updated W and g, and a mini Xc
+    random_index = sample(1:length(Xin_split), 1)
+    iter = iter + 1
+    taucount = 1
+    err = 1
+    orthoerror = 1
+    W2 = W1
+    tau = 0.5 # penalty
+    eigenval = rep(0, M)
+    while (taucount < 60 & err > 1e-05 & orthoerror > 1e-05) { # Only update W2
+      for (j in 1:M) {               # Go over all the elements in eigenval and W2
+        Gam = 0
+        if (j > 1) {
+          for (k in 1:(j - 1)) {
+            nu = matrix(W2[k, ], M, 1) %*% matrix(W2[k, ], 1, M)
+            Gam = Gam + nu
+            }
+          }
+        tmpmat = t(matrix(Xin_processed[[random_index]]$tmp %*% matrix(1/Xin_processed[[random_index]]$g[j, ], Xin_processed[[random_index]]$freqlength, 1), M, M))
+        tmpV = tmpmat + tau * Gam
+        eigenv = eigen(tmpV)
+        eigenval[j] = eigenv$values[M]  # update
+        W2[j, ] = eigenv$vectors[, M]
+        }
+      orthoerror = sum(sum((W2 %*% t(W2) - diag(rep(1,M)))^2))
+      err = amari_distance(rerow(W1), rerow(W2))
+      taucount = taucount + 1
+      tau = 2 * tau
+      }    # W update ends
+    wlik2 = -1 * sum(eigenval) - 1 * sum(log(Xin_processed[[random_index]]$g)) + N * log(abs(det(W2)))
+    if (wlik < wlik2) {
+      Wtmp = W1
+      wlik = wlik2
+      }
+    else print(paste("Mini-batch Color ICA - Iteration ", iter, 
+                       ": current Whittle likelihood(", wlik2, ") is smaller than previous one (", 
+                       wlik, ")."))
+    lim = err
+    print(paste("Mini-batch Color ICA - Iteration ", iter, ": error is equal to ", 
+                  lim, sep = ""))
+    W1 = W2  # Give the value of W2 to W1 for next iteration
+    if ((iter == maxit & NInv < nmaxit)) {
+      print("Mini-batch Color ICA: iteration reaches to maximum. Start new iteration.")
+      W2 = matrix(rnorm(M * M), M, M)
+      qrdec = qr(W2)
+      W2 = qr.Q(qrdec)
+      iter = 0
+      NInv = NInv + 1
+      }
+    WXc = W2 %*% Xin_processed[[random_index]]$Xc
+    for (j in 1:M) {
+      fit = ar.yw(WXc[j, ], order.max = maxnmodels) # Yule Walker
+      if (fit$order == 0) 
+        Xin_processed[[random_index]]$g[j, ] = fit$var.pred/(2 * pi) * rep(1, Xin_processed[[random_index]]$freqlength)  # g (spectral density) used from last batches
+      else Xin_processed[[random_index]]$g[j, ] = (fit$var.pred/(2 * pi))/(abs(1 - 
+                                                     matrix(fit$ar, 1, fit$order) %*% exp(-(0+1i) * 
+                                                                                            matrix(1:fit$order, fit$order, 1) %*% Xin_processed[[random_index]]$freq))^2) 
+      } # g update ends
+    if (NInv == nmaxit) {
+      print("Mini-batch Color ICA: no convergence")
+      }
+    }  # ends
+    
+    if (wlik > wlik2) {
+      W2 = Wtmp
+      wlik2 = wlik
+    }
+
+  wt = W2 %*% K
+  result = new.env()
+  result$W = W2
+  result$K = K
+  result$A = t(wt) %*% solve(wt %*% t(wt))
+  result$S = wt %*% X
+  result$X = X
+  result$iter = iter
+  result$NInv = NInv
+  #result$den = g
+  as.list(result)
+}
+```
 
 ```{r cICA example}
 T=256
@@ -183,22 +317,58 @@ A = rerow(matrix(runif(M^2)-0.5,M,M))
 W = solve(A)
 S=rbind(S1,S2,S3)
 X = A %*% S
-cica = minibatch_cICA(X,tol=0.001)
+
+start_time = Sys.time()
+minicica = minibatch_cICA(X,tol=0.001)
+end_time = Sys.time()
+minicica_time = end_time - start_time
+
+start_time = Sys.time()
+cica = cICA(X,tol=0.001)
+end_time = Sys.time()
+cica_time = end_time - start_time
 ## scica = scICA(X,n1=n1,n2=n2,h=0.8,tol=0.001)
+
+start_time = Sys.time()
 fica = fastICA(t(X),3)
-amari_distance(t(A),t(cica$A))
+end_time = Sys.time()
+fica_time = end_time - start_time
+
+print(cat("The amari distance from mini batch cICA is", amari_distance(t(A),t(minicica$A))))
+minicica_time
+
+print(cat("The amari distance from cICA is", amari_distance(t(A),t(cica$A))))
+cica_time
 ## amari_distance(t(A),t(scica$A))
-amari_distance(t(A),fica$A)
-Shat1=cica$S
-## Shat2=scica$S
+
+print(cat("The amari distance from fast ICA is", amari_distance(t(A),t(fica$A))))
+fica_time
+Shat1=minicica$S
+Shat2=cica$S
 Shat3=t(fica$S)
-par(mfrow=c(2,2))
+par(mfrow=c(3,2))
 plot(S[1,],type="l",lwd=2)
 plot(Shat1[1,],type="l",lwd=2,col="red")
 plot(S[2,],type="l",lwd=2)
 plot(Shat1[2,],type="l",lwd=2,col="red")
 plot(S[3,],type="l",lwd=2)
 plot(Shat1[3,],type="l",lwd=2,col="red")
+
+par(mfrow=c(3,2))
+plot(S[1,],type="l",lwd=2)
+plot(Shat2[1,],type="l",lwd=2,col="red")
+plot(S[2,],type="l",lwd=2)
+plot(Shat2[2,],type="l",lwd=2,col="red")
+plot(S[3,],type="l",lwd=2)
+plot(Shat2[3,],type="l",lwd=2,col="red")
+
+par(mfrow=c(3,2))
+plot(S[1,],type="l",lwd=2)
+plot(Shat3[1,],type="l",lwd=2,col="red")
+plot(S[2,],type="l",lwd=2)
+plot(Shat3[2,],type="l",lwd=2,col="red")
+plot(S[3,],type="l",lwd=2)
+plot(Shat3[3,],type="l",lwd=2,col="red")
 ```
 
 
