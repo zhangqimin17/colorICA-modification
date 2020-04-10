@@ -1,5 +1,5 @@
 ---
-title: "cICA"
+title: "Mini-batch cICA with Xc processed"
 author: "Qimin Zhang"
 date: "2/28/2020"
 output: pdf_document
